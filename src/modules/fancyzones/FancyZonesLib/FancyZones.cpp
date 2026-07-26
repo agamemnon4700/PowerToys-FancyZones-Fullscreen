@@ -460,13 +460,21 @@ void FancyZones::MoveSizeEnd()
 
 std::optional<RECT> FancyZones::GetAssignedZoneRect(HWND window) noexcept
 {
-    const auto rectForWorkArea = [window](const WorkArea* workArea) -> std::optional<RECT> {
+    const auto rectForWorkArea = [window](const WorkArea* workArea, bool useWindowProperty) -> std::optional<RECT> {
         if (!workArea || !workArea->GetLayout())
         {
             return std::nullopt;
         }
 
-        const auto zones = workArea->GetLayoutWindows().GetZoneIndexSetFromWindow(window);
+        auto zones = workArea->GetLayoutWindows().GetZoneIndexSetFromWindow(window);
+        if (zones.empty() && useWindowProperty)
+        {
+            // Zone stamps live on the app window and survive a FancyZones
+            // restart. Use them on the window's current work area when history
+            // recovery has not rebuilt the in-memory assignment yet.
+            zones = FancyZonesWindowProperties::RetrieveZoneIndexProperty(window);
+        }
+
         if (zones.empty())
         {
             return std::nullopt;
@@ -492,7 +500,7 @@ std::optional<RECT> FancyZones::GetAssignedZoneRect(HWND window) noexcept
     };
 
     const auto currentWorkArea = m_workAreaConfiguration.GetWorkAreaFromWindow(window);
-    if (const auto currentRect = rectForWorkArea(currentWorkArea))
+    if (const auto currentRect = rectForWorkArea(currentWorkArea, true))
     {
         return currentRect;
     }
@@ -507,7 +515,7 @@ std::optional<RECT> FancyZones::GetAssignedZoneRect(HWND window) noexcept
             continue;
         }
 
-        if (const auto candidate = rectForWorkArea(workArea.get()))
+        if (const auto candidate = rectForWorkArea(workArea.get(), false))
         {
             if (fallback)
             {
