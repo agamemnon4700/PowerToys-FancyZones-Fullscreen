@@ -119,11 +119,6 @@ bool FancyZonesWindowUtils::IsWindowMaximized(HWND window) noexcept
     return false;
 }
 
-bool FancyZonesWindowUtils::HasFullscreenStyle(LONG_PTR style) noexcept
-{
-    return (style & (WS_CAPTION | WS_THICKFRAME)) == 0;
-}
-
 bool FancyZonesWindowUtils::IsFullscreenWindow(const RECT& windowRect, const RECT& monitorRect, LONG_PTR style) noexcept
 {
     if (!HasFullscreenStyle(style))
