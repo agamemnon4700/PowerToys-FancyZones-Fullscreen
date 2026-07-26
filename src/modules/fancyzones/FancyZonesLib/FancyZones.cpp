@@ -69,7 +69,13 @@ namespace
     constexpr LONG fullscreenRectTolerance = 1;
     constexpr unsigned int maxFullscreenCorrectionAttempts = 4;
     constexpr ULONGLONG fullscreenTransitionGraceMs = 1000;
-    constexpr UINT fullscreenPositionFlags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_ASYNCWINDOWPOS;
+    // Chromium rewrites cross-process resize requests back to the monitor
+    // rectangle from WM_WINDOWPOSCHANGING while it is fullscreen.
+    constexpr UINT fullscreenPositionFlags = SWP_NOACTIVATE |
+                                             SWP_NOOWNERZORDER |
+                                             SWP_NOZORDER |
+                                             SWP_NOSENDCHANGING |
+                                             SWP_ASYNCWINDOWPOS;
 
     bool RectsMatch(const RECT& lhs, const RECT& rhs, LONG tolerance = fullscreenRectTolerance) noexcept
     {
@@ -627,6 +633,10 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
 
         if (RectsMatch(currentRect, state->second.constrainedRect))
         {
+            // Count only consecutive attempts that have not yet been observed
+            // at the zone rectangle. Fullscreen apps can reassert their monitor
+            // bounds after focus changes throughout a long-running session.
+            state->second.correctionAttempts = 0;
             return;
         }
 
@@ -709,9 +719,12 @@ void FancyZones::UpdateFullscreenWindows() noexcept
 
     std::vector<HWND> trackedWindows;
     trackedWindows.reserve(m_fullscreenWindows.size());
+    std::unordered_set<HWND> handledWindows;
+    handledWindows.reserve(m_fullscreenWindows.size());
     for (const auto& [window, _] : m_fullscreenWindows)
     {
         trackedWindows.push_back(window);
+        handledWindows.insert(window);
     }
 
     for (const auto window : trackedWindows)
@@ -728,7 +741,10 @@ void FancyZones::UpdateFullscreenWindows() noexcept
 
         for (const auto& windowAssignment : workArea->GetLayoutWindows().SnappedWindows())
         {
-            HandleFullscreenWindow(windowAssignment.first);
+            if (handledWindows.emplace(windowAssignment.first).second)
+            {
+                HandleFullscreenWindow(windowAssignment.first);
+            }
         }
     }
 }
