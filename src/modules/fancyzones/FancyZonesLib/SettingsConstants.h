@@ -14,6 +14,7 @@ enum class SettingId
     AppLastZoneMoveWindows,
     OpenWindowOnActiveMonitor,
     RestoreWindowSize,
+    FullscreenInZone,
     QuickLayoutSwitch,
     FlashZonesOnQuickSwitch,
     LaunchEditorOnScreenWhereCursorPlaced,

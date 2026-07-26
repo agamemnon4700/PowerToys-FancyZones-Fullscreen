@@ -108,6 +108,15 @@ Controls whether newly opened windows appear on the currently active monitor.
 **Type:** boolean  
 **Default:** `false`
 
+### fancyzones_fullscreenInZone
+
+Controls whether borderless fullscreen apps that are assigned to a FancyZone
+remain within that zone. Holding Shift while entering fullscreen bypasses the
+behavior for that fullscreen session.
+
+**Type:** boolean
+**Default:** `false`
+
 ### fancyzones_spanZonesAcrossMonitors
 
 Controls whether zones can span across multiple monitors.

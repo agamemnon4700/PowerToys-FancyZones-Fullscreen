@@ -20,6 +20,11 @@
   <a href="#-whats-new">Release notes</a>
 </h3>
 
+> [!NOTE]
+> This fork adds an opt-in FancyZones setting that keeps Chromium F11 and
+> fullscreen web video inside the window's assigned zone. See the
+> [design and validation guide](doc/devdocs/modules/fancyzones-fullscreen-in-zone.md).
+
 ## 🔨 Utilities
 
 PowerToys includes over 30 utilities to help you customize and optimize your Windows experience:

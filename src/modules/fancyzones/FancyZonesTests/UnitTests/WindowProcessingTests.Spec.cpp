@@ -226,5 +226,55 @@ namespace FancyZonesUnitTests
             Assert::IsTrue(FancyZonesWindowProcessing::IsProcessableAutomatically(window));
             Assert::IsTrue(FancyZonesWindowProcessing::IsProcessableManually(window));
         }
+
+        TEST_METHOD (BorderlessMonitorSizedWindowIsFullscreen)
+        {
+            const RECT monitorRect{ 0, 0, 1920, 1080 };
+            const RECT windowRect{ 0, 0, 1920, 1080 };
+
+            Assert::IsTrue(FancyZonesWindowUtils::IsFullscreenWindow(windowRect, monitorRect, WS_POPUP | WS_VISIBLE));
+        }
+
+        TEST_METHOD (FramedMonitorSizedWindowIsNotFullscreen)
+        {
+            const RECT monitorRect{ 0, 0, 1920, 1080 };
+            const RECT windowRect{ 0, 0, 1920, 1080 };
+
+            Assert::IsFalse(FancyZonesWindowUtils::IsFullscreenWindow(windowRect, monitorRect, WS_OVERLAPPEDWINDOW | WS_VISIBLE));
+        }
+
+        TEST_METHOD (BorderlessWindowMustCoverMonitor)
+        {
+            const RECT monitorRect{ 0, 0, 1920, 1080 };
+            const RECT windowRect{ 200, 100, 1720, 980 };
+
+            Assert::IsFalse(FancyZonesWindowUtils::IsFullscreenWindow(windowRect, monitorRect, WS_POPUP | WS_VISIBLE));
+        }
+
+        TEST_METHOD (FullscreenDetectionAllowsWindowsFrameTolerance)
+        {
+            const RECT monitorRect{ 0, 0, 1920, 1080 };
+            const RECT withinTolerance{ 8, 8, 1912, 1072 };
+            const RECT outsideTolerance{ 9, 8, 1912, 1072 };
+
+            Assert::IsTrue(FancyZonesWindowUtils::IsFullscreenWindow(withinTolerance, monitorRect, WS_POPUP | WS_VISIBLE));
+            Assert::IsFalse(FancyZonesWindowUtils::IsFullscreenWindow(outsideTolerance, monitorRect, WS_POPUP | WS_VISIBLE));
+        }
+
+        TEST_METHOD (FullscreenDetectionSupportsNegativeMonitorCoordinates)
+        {
+            const RECT monitorRect{ -1920, -200, 0, 880 };
+            const RECT windowRect{ -1920, -200, 0, 880 };
+
+            Assert::IsTrue(FancyZonesWindowUtils::IsFullscreenWindow(windowRect, monitorRect, WS_POPUP | WS_VISIBLE));
+        }
+
+        TEST_METHOD (FullscreenDetectionRejectsOversizedWindow)
+        {
+            const RECT monitorRect{ 0, 0, 1920, 1080 };
+            const RECT windowRect{ -20, -20, 1940, 1100 };
+
+            Assert::IsFalse(FancyZonesWindowUtils::IsFullscreenWindow(windowRect, monitorRect, WS_POPUP | WS_VISIBLE));
+        }
     };
 }

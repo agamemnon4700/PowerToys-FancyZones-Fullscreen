@@ -9,16 +9,25 @@
 
 #include <FancyZonesLib/Generated Files/resource.h>
 #include <FancyZonesLib/FancyZonesData.h>
+#include <FancyZonesLib/FancyZonesWindowProperties.h>
 #include <FancyZonesLib/FancyZonesWinHookEventIDs.h>
 #include <FancyZonesLib/Settings.h>
 #include <FancyZonesLib/trace.h>
 
+namespace
+{
+    std::unordered_set<SettingId> InitializeWinHookEventsAndGetObservedSettings()
+    {
+        InitializeWinhookEventIds();
+        return { SettingId::FullscreenInZone };
+    }
+}
 
-FancyZonesApp::FancyZonesApp(const std::wstring& appName, const std::wstring& appKey)
+FancyZonesApp::FancyZonesApp(const std::wstring& appName, const std::wstring& appKey) :
+    SettingsObserver(InitializeWinHookEventsAndGetObservedSettings())
 {
     DPIAware::EnableDPIAwarenessForThisProcess();
-        
-    InitializeWinhookEventIds();
+
     m_app = MakeFancyZones(reinterpret_cast<HINSTANCE>(&__ImageBase), std::bind(&FancyZonesApp::DisableModule, this));
 
     m_mainThreadId = GetCurrentThreadId();
@@ -36,6 +45,8 @@ FancyZonesApp::FancyZonesApp(const std::wstring& appName, const std::wstring& ap
 
 FancyZonesApp::~FancyZonesApp()
 {
+    s_instance = nullptr;
+
     if (m_app)
     {
         m_app->Destroy();
@@ -117,6 +128,42 @@ void FancyZonesApp::InitHooks()
                         MB_OK | MB_ICONERROR);
         }
     }
+
+    UpdateLocationChangeHook();
+}
+
+void FancyZonesApp::UpdateLocationChangeHook() noexcept
+{
+    const bool shouldListen = m_moveSizeInProgress || FancyZonesSettings::settings().fullscreenInZone;
+    if (shouldListen && !m_objectLocationWinEventHook)
+    {
+        m_objectLocationWinEventHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,
+                                                       EVENT_OBJECT_LOCATIONCHANGE,
+                                                       nullptr,
+                                                       WinHookProc,
+                                                       0,
+                                                       0,
+                                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        if (!m_objectLocationWinEventHook)
+        {
+            Logger::error(L"Failed to subscribe to window location changes");
+        }
+    }
+    else if (!shouldListen && m_objectLocationWinEventHook)
+    {
+        if (UnhookWinEvent(m_objectLocationWinEventHook))
+        {
+            m_objectLocationWinEventHook = nullptr;
+        }
+    }
+}
+
+void FancyZonesApp::SettingsUpdate(SettingId id)
+{
+    if (id == SettingId::FullscreenInZone && m_app)
+    {
+        UpdateLocationChangeHook();
+    }
 }
 
 void FancyZonesApp::DisableModule() noexcept
@@ -132,32 +179,30 @@ void FancyZonesApp::HandleWinHookEvent(WinHookEvent* data) noexcept
     case EVENT_SYSTEM_MOVESIZESTART:
     {
         fzCallback->HandleWinHookEvent(data);
-        if (!m_objectLocationWinEventHook)
-        {
-            m_objectLocationWinEventHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,
-                                                           EVENT_OBJECT_LOCATIONCHANGE,
-                                                           nullptr,
-                                                           WinHookProc,
-                                                           0,
-                                                           0,
-                                                           WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-        }
+        m_moveSizeInProgress = true;
+        UpdateLocationChangeHook();
     }
     break;
 
     case EVENT_SYSTEM_MOVESIZEEND:
     {
-        if (UnhookWinEvent(m_objectLocationWinEventHook))
-        {
-            m_objectLocationWinEventHook = nullptr;
-        }
+        m_moveSizeInProgress = false;
+        UpdateLocationChangeHook();
         fzCallback->HandleWinHookEvent(data);
     }
     break;
 
     case EVENT_OBJECT_LOCATIONCHANGE:
     {
-        fzCallback->HandleWinHookEvent(data);
+        if (data->idObject == OBJID_WINDOW &&
+            data->idChild == CHILDID_SELF &&
+            IsWindow(data->hwnd) &&
+            GetAncestor(data->hwnd, GA_ROOT) == data->hwnd &&
+            (m_moveSizeInProgress ||
+             !FancyZonesWindowProperties::RetrieveZoneIndexProperty(data->hwnd).empty()))
+        {
+            fzCallback->HandleWinHookEvent(data);
+        }
     }
     break;
 

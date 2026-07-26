@@ -41,6 +41,7 @@ public class SetSettingCommandTests
     [TestMethod]
     [DataRow(typeof(PowerRenameSettings), nameof(PowerRenameProperties.MaxMRUSize), "123")]
     [DataRow(typeof(FancyZonesSettings), nameof(FZConfigProperties.FancyzonesBorderColor), "#00FF00")]
+    [DataRow(typeof(FancyZonesSettings), nameof(FZConfigProperties.FancyzonesFullscreenInZone), "true")]
     [DataRow(typeof(MeasureToolSettings), nameof(MeasureToolProperties.ActivationShortcut), "Ctrl+Alt+Delete")]
     [DataRow(typeof(AlwaysOnTopSettings), nameof(AlwaysOnTopProperties.SoundEnabled), "False")]
     [DataRow(typeof(AlwaysOnTopSettings), nameof(AlwaysOnTopProperties.ShowInSystemMenu), "true")]

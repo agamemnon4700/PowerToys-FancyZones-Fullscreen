@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "WindowUtils.h"
 
+#include <cstdlib>
+
 #include <common/display/dpi_aware.h>
 #include <common/logger/logger.h>
 #include <common/utils/process_path.h>
@@ -115,6 +117,57 @@ bool FancyZonesWindowUtils::IsWindowMaximized(HWND window) noexcept
         return true;
     }
     return false;
+}
+
+bool FancyZonesWindowUtils::HasFullscreenStyle(LONG_PTR style) noexcept
+{
+    return (style & (WS_CAPTION | WS_THICKFRAME)) == 0;
+}
+
+bool FancyZonesWindowUtils::IsFullscreenWindow(const RECT& windowRect, const RECT& monitorRect, LONG_PTR style) noexcept
+{
+    if (!HasFullscreenStyle(style))
+    {
+        return false;
+    }
+
+    constexpr LONG rectTolerance = 8;
+    const bool hasPositiveArea = windowRect.right > windowRect.left && windowRect.bottom > windowRect.top;
+    const bool coversMonitor = std::abs(windowRect.left - monitorRect.left) <= rectTolerance &&
+                               std::abs(windowRect.top - monitorRect.top) <= rectTolerance &&
+                               std::abs(windowRect.right - monitorRect.right) <= rectTolerance &&
+                               std::abs(windowRect.bottom - monitorRect.bottom) <= rectTolerance;
+
+    return hasPositiveArea && coversMonitor;
+}
+
+bool FancyZonesWindowUtils::IsFullscreenWindow(HWND window) noexcept
+{
+    if (!window || !IsWindowVisible(window) || IsIconic(window))
+    {
+        return false;
+    }
+
+    RECT windowRect{};
+    if (!GetWindowRect(window, &windowRect))
+    {
+        return false;
+    }
+
+    const auto monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
+    if (!monitor)
+    {
+        return false;
+    }
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo))
+    {
+        return false;
+    }
+
+    return IsFullscreenWindow(windowRect, monitorInfo.rcMonitor, GetWindowLongPtrW(window, GWL_STYLE));
 }
 
 bool FancyZonesWindowUtils::HasVisibleOwner(HWND window) noexcept

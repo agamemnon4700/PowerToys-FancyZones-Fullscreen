@@ -1418,6 +1418,9 @@ opera.exe</value>
   <data name="FancyZones_RestoreSize.Content" xml:space="preserve">
     <value>Restore the original size of windows when unsnapping</value>
   </data>
+  <data name="FancyZones_FullscreenInZone.Content" xml:space="preserve">
+    <value>Keep fullscreen apps in their zones (hold Shift to bypass)</value>
+  </data>
   <data name="ImageResizer_FallBackEncoderText.Header" xml:space="preserve">
     <value>Fallback encoder</value>
   </data>

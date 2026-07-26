@@ -67,6 +67,7 @@ namespace ViewModelTests
             Assert.AreEqual(originalSettings.Properties.FancyzonesOpenWindowOnActiveMonitor.Value, viewModel.OpenWindowOnActiveMonitor);
             Assert.AreEqual(originalSettings.Properties.FancyzonesOverrideSnapHotkeys.Value, viewModel.OverrideSnapHotkeys);
             Assert.AreEqual(originalSettings.Properties.FancyzonesRestoreSize.Value, viewModel.RestoreSize);
+            Assert.AreEqual(originalSettings.Properties.FancyzonesFullscreenInZone.Value, viewModel.FullscreenInZone);
             Assert.AreEqual(originalSettings.Properties.FancyzonesShiftDrag.Value, viewModel.ShiftDrag);
             Assert.AreEqual(originalSettings.Properties.FancyzonesShowOnAllMonitors.Value, viewModel.ShowOnAllMonitors);
             Assert.AreEqual(originalSettings.Properties.FancyzonesSpanZonesAcrossMonitors.Value, viewModel.SpanZonesAcrossMonitors);
@@ -375,6 +376,33 @@ namespace ViewModelTests
             var expected = viewModel.RestoreSize;
             var actual = SettingsRepository<FancyZonesSettings>.GetInstance(mockFancyZonesSettingsUtils.Object).SettingsConfig.Properties.FancyzonesRestoreSize.Value;
             Assert.AreEqual(expected, actual);
+        }
+
+        [TestMethod]
+        public void FullscreenInZoneShouldSetValue2TrueWhenSuccessful()
+        {
+            Mock<SettingsUtils> mockSettingsUtils = new Mock<SettingsUtils>(new FileSystem(), null);
+
+            // arrange
+            FancyZonesViewModel viewModel = new FancyZonesViewModel(mockSettingsUtils.Object, SettingsRepository<GeneralSettings>.GetInstance(mockGeneralSettingsUtils.Object), SettingsRepository<FancyZonesSettings>.GetInstance(mockFancyZonesSettingsUtils.Object), sendMockIPCConfigMSG, FancyZonesTestFolderName);
+            Assert.IsFalse(viewModel.FullscreenInZone); // check if value was initialized to false.
+
+            // act
+            viewModel.FullscreenInZone = true;
+
+            // assert
+            var expected = viewModel.FullscreenInZone;
+            var actual = SettingsRepository<FancyZonesSettings>.GetInstance(mockFancyZonesSettingsUtils.Object).SettingsConfig.Properties.FancyzonesFullscreenInZone.Value;
+            Assert.AreEqual(expected, actual);
+
+            Func<string, bool> savedFullscreenInZone = json =>
+                JsonSerializer.Deserialize<FancyZonesSettings>(json).Properties.FancyzonesFullscreenInZone.Value;
+            mockSettingsUtils.Verify(
+                settings => settings.SaveSettings(
+                    It.Is<string>(json => savedFullscreenInZone(json)),
+                    It.IsAny<string>(),
+                    It.IsAny<string>()),
+                Times.Once);
         }
 
         [TestMethod]

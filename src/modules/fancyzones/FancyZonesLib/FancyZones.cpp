@@ -1,6 +1,11 @@
 #include "pch.h"
 #include "FancyZones.h"
 
+#include <cstdlib>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include <common/interop/shared_constants.h>
 #include <common/logger/logger.h>
 #include <common/logger/call_tracer.h>
@@ -43,6 +48,49 @@ enum class DisplayChangeType
     Initialization
 };
 
+enum class FullscreenInZoneState
+{
+    Constrained,
+    Bypassed,
+};
+
+struct FullscreenInZoneWindowInfo
+{
+    FullscreenInZoneState state = FullscreenInZoneState::Constrained;
+    DWORD processId = 0;
+    RECT fullscreenRect{};
+    RECT constrainedRect{};
+    unsigned int correctionAttempts = 0;
+    ULONGLONG transitionGraceUntil = 0;
+};
+
+namespace
+{
+    constexpr LONG fullscreenRectTolerance = 1;
+    constexpr unsigned int maxFullscreenCorrectionAttempts = 4;
+    constexpr ULONGLONG fullscreenTransitionGraceMs = 1000;
+    constexpr UINT fullscreenPositionFlags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_ASYNCWINDOWPOS;
+
+    bool RectsMatch(const RECT& lhs, const RECT& rhs, LONG tolerance = fullscreenRectTolerance) noexcept
+    {
+        return std::abs(lhs.left - rhs.left) <= tolerance &&
+               std::abs(lhs.top - rhs.top) <= tolerance &&
+               std::abs(lhs.right - rhs.right) <= tolerance &&
+               std::abs(lhs.bottom - rhs.bottom) <= tolerance;
+    }
+
+    bool PositionWindow(HWND window, const RECT& rect) noexcept
+    {
+        return SetWindowPos(window,
+                            nullptr,
+                            rect.left,
+                            rect.top,
+                            rect.right - rect.left,
+                            rect.bottom - rect.top,
+                            fullscreenPositionFlags);
+    }
+}
+
 constexpr wchar_t* DisplayChangeTypeName (const DisplayChangeType type){
     switch (type)
     {
@@ -70,7 +118,7 @@ struct FancyZones : public winrt::implements<FancyZones, IFancyZones, IFancyZone
 {
 public:
     FancyZones(HINSTANCE hinstance, std::function<void()> disableModuleCallbackFunction) noexcept :
-        SettingsObserver({ SettingId::EditorHotkey, SettingId::WindowSwitching, SettingId::PrevTabHotkey, SettingId::NextTabHotkey, SettingId::SpanZonesAcrossMonitors }),
+        SettingsObserver({ SettingId::EditorHotkey, SettingId::WindowSwitching, SettingId::PrevTabHotkey, SettingId::NextTabHotkey, SettingId::SpanZonesAcrossMonitors, SettingId::FullscreenInZone }),
         m_hinstance(hinstance),
         m_draggingState([this]() {
             PostMessageW(m_window, WM_PRIV_LOCATIONCHANGE, NULL, NULL);
@@ -115,8 +163,25 @@ public:
             PostMessageW(m_window, WM_PRIV_MOVESIZEEND, wparam, lparam);
             break;
         case EVENT_OBJECT_LOCATIONCHANGE:
-            PostMessageW(m_window, WM_PRIV_LOCATIONCHANGE, wparam, lparam);
-            break;
+        {
+            if (!m_window)
+            {
+                break;
+            }
+
+            if (!m_pendingLocationChanges.emplace(data->hwnd).second)
+            {
+                break;
+            }
+
+            const LONG shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            if (!PostMessageW(m_window, WM_PRIV_LOCATIONCHANGE, wparam, shiftDown))
+            {
+                m_pendingLocationChanges.erase(data->hwnd);
+                Logger::warn(L"Failed to queue a fullscreen window location update, {}", get_last_error_or_default(GetLastError()));
+            }
+        }
+        break;
         case EVENT_OBJECT_NAMECHANGE:
             PostMessageW(m_window, WM_PRIV_NAMECHANGE, wparam, lparam);
             break;
@@ -147,6 +212,11 @@ public:
     void MoveSizeStart(HWND window, HMONITOR monitor);
     void MoveSizeUpdate(HMONITOR monitor, POINT const& ptScreen);
     void MoveSizeEnd();
+    void HandleFullscreenWindow(HWND window, bool shiftDown = false) noexcept;
+    void UpdateFullscreenWindows() noexcept;
+    void ReleaseFullscreenWindows() noexcept;
+    void RestoreFullscreenWindow(HWND window, const FullscreenInZoneWindowInfo& info) noexcept;
+    std::optional<RECT> GetAssignedZoneRect(HWND window) noexcept;
 
     void WindowCreated(HWND window) noexcept;
     void ToggleEditor() noexcept;
@@ -186,6 +256,8 @@ private:
     WindowKeyboardSnap m_windowKeyboardSnapper{};
     WorkAreaConfiguration m_workAreaConfiguration;
     DraggingState m_draggingState;
+    std::unordered_map<HWND, FullscreenInZoneWindowInfo> m_fullscreenWindows;
+    std::unordered_set<HWND> m_pendingLocationChanges;
 
     wil::unique_handle m_terminateEditorEvent; // Handle of FancyZonesEditor.exe we launch and wait on
 
@@ -292,6 +364,8 @@ FancyZones::Run() noexcept
 IFACEMETHODIMP_(void)
 FancyZones::Destroy() noexcept
 {
+    ReleaseFullscreenWindows();
+    m_pendingLocationChanges.clear();
     m_workAreaConfiguration.Clear();
     BufferedPaintUnInit();
     if (m_window)
@@ -355,6 +429,308 @@ void FancyZones::MoveSizeEnd()
     // Always disable dragging state, even if m_windowMouseSnapper was already null.
     // This prevents stuck drag state when a window is destroyed mid-drag.
     m_draggingState.Disable();
+}
+
+std::optional<RECT> FancyZones::GetAssignedZoneRect(HWND window) noexcept
+{
+    const auto rectForWorkArea = [window](const WorkArea* workArea) -> std::optional<RECT> {
+        if (!workArea || !workArea->GetLayout())
+        {
+            return std::nullopt;
+        }
+
+        const auto zones = workArea->GetLayoutWindows().GetZoneIndexSetFromWindow(window);
+        if (zones.empty())
+        {
+            return std::nullopt;
+        }
+
+        auto rect = workArea->GetLayout()->GetCombinedZonesRect(zones);
+        if (rect.right <= rect.left || rect.bottom <= rect.top)
+        {
+            return std::nullopt;
+        }
+
+        if (const auto workAreaWindow = workArea->GetWorkAreaWindow())
+        {
+            MapWindowRect(workAreaWindow, nullptr, &rect);
+        }
+        else
+        {
+            const auto& workAreaRect = workArea->GetWorkAreaRect();
+            OffsetRect(&rect, workAreaRect.left(), workAreaRect.top());
+        }
+
+        return rect;
+    };
+
+    const auto currentWorkArea = m_workAreaConfiguration.GetWorkAreaFromWindow(window);
+    if (const auto currentRect = rectForWorkArea(currentWorkArea))
+    {
+        return currentRect;
+    }
+
+    // History recovery can temporarily assign one HWND to more than one work
+    // area. Use a sole fallback assignment, but reject ambiguous stale data.
+    std::optional<RECT> fallback;
+    for (const auto& [_, workArea] : m_workAreaConfiguration.GetAllWorkAreas())
+    {
+        if (workArea.get() == currentWorkArea)
+        {
+            continue;
+        }
+
+        if (const auto candidate = rectForWorkArea(workArea.get()))
+        {
+            if (fallback)
+            {
+                return std::nullopt;
+            }
+
+            fallback = candidate;
+        }
+    }
+
+    return fallback;
+}
+
+void FancyZones::RestoreFullscreenWindow(HWND window, const FullscreenInZoneWindowInfo& info) noexcept
+{
+    if (info.state != FullscreenInZoneState::Constrained ||
+        !window ||
+        !IsWindow(window) ||
+        !IsWindowVisible(window) ||
+        IsIconic(window))
+    {
+        return;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (!processId || processId != info.processId ||
+        !FancyZonesWindowUtils::HasFullscreenStyle(GetWindowLongPtrW(window, GWL_STYLE)))
+    {
+        return;
+    }
+
+    RECT currentRect{};
+    if (!GetWindowRect(window, &currentRect))
+    {
+        return;
+    }
+
+    const bool insideTransitionGrace = GetTickCount64() < info.transitionGraceUntil;
+    if (!insideTransitionGrace &&
+        !RectsMatch(currentRect, info.constrainedRect) &&
+        !RectsMatch(currentRect, info.fullscreenRect))
+    {
+        return;
+    }
+
+    // Queue the original fullscreen rectangle even when it is already current:
+    // this makes the restore follow any earlier asynchronous confinement request.
+    if (!PositionWindow(window, info.fullscreenRect))
+    {
+        Logger::warn(L"Failed to restore a fullscreen window after releasing it from its FancyZone, {}", get_last_error_or_default(GetLastError()));
+    }
+}
+
+void FancyZones::ReleaseFullscreenWindows() noexcept
+{
+    for (const auto& [window, info] : m_fullscreenWindows)
+    {
+        RestoreFullscreenWindow(window, info);
+    }
+
+    m_fullscreenWindows.clear();
+}
+
+void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
+{
+    if (!window || !IsWindow(window))
+    {
+        m_fullscreenWindows.erase(window);
+        return;
+    }
+
+    auto state = m_fullscreenWindows.find(window);
+    bool targetChangedWhileConstrained = false;
+    if (state != m_fullscreenWindows.end())
+    {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        if (!processId || processId != state->second.processId)
+        {
+            m_fullscreenWindows.erase(state);
+            return;
+        }
+
+        if (!IsWindowVisible(window) || IsIconic(window))
+        {
+            return;
+        }
+
+        if (state->second.state == FullscreenInZoneState::Bypassed)
+        {
+            const bool insideBypassGrace = GetTickCount64() < state->second.transitionGraceUntil;
+            if (!insideBypassGrace && !FancyZonesWindowUtils::IsFullscreenWindow(window))
+            {
+                m_fullscreenWindows.erase(state);
+            }
+            return;
+        }
+
+        if (!FancyZonesWindowUtils::HasFullscreenStyle(GetWindowLongPtrW(window, GWL_STYLE)))
+        {
+            m_fullscreenWindows.erase(state);
+            return;
+        }
+
+        const auto targetRect = GetAssignedZoneRect(window);
+        if (!targetRect)
+        {
+            RestoreFullscreenWindow(window, state->second);
+            m_fullscreenWindows.erase(state);
+            return;
+        }
+
+        RECT currentRect{};
+        if (!GetWindowRect(window, &currentRect))
+        {
+            return;
+        }
+
+        if (!RectsMatch(*targetRect, state->second.constrainedRect))
+        {
+            const bool stillFullscreenSession = RectsMatch(currentRect, state->second.constrainedRect) ||
+                                                FancyZonesWindowUtils::IsFullscreenWindow(window);
+            if (!stillFullscreenSession)
+            {
+                m_fullscreenWindows.erase(state);
+                return;
+            }
+
+            state->second.constrainedRect = *targetRect;
+            state->second.correctionAttempts = 0;
+            state->second.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
+            targetChangedWhileConstrained = true;
+
+            MONITORINFO monitorInfo{};
+            monitorInfo.cbSize = sizeof(monitorInfo);
+            const RECT targetMonitorRect = *targetRect;
+            const auto monitor = MonitorFromRect(&targetMonitorRect, MONITOR_DEFAULTTONEAREST);
+            if (monitor && GetMonitorInfoW(monitor, &monitorInfo))
+            {
+                state->second.fullscreenRect = monitorInfo.rcMonitor;
+            }
+        }
+
+        if (RectsMatch(currentRect, state->second.constrainedRect))
+        {
+            return;
+        }
+
+        // A borderless window that is neither at our zone rectangle nor back at
+        // its monitor bounds has left fullscreen without restoring a frame.
+        if (!targetChangedWhileConstrained && !FancyZonesWindowUtils::IsFullscreenWindow(window))
+        {
+            if (GetTickCount64() < state->second.transitionGraceUntil)
+            {
+                return;
+            }
+
+            m_fullscreenWindows.erase(state);
+            return;
+        }
+    }
+    else
+    {
+        const auto targetRect = GetAssignedZoneRect(window);
+        if (!targetRect || !FancyZonesWindowUtils::IsFullscreenWindow(window))
+        {
+            return;
+        }
+
+        RECT fullscreenRect{};
+        if (!GetWindowRect(window, &fullscreenRect))
+        {
+            return;
+        }
+
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        if (!processId)
+        {
+            return;
+        }
+
+        FullscreenInZoneWindowInfo info;
+        info.state = shiftDown ? FullscreenInZoneState::Bypassed : FullscreenInZoneState::Constrained;
+        info.processId = processId;
+        info.fullscreenRect = fullscreenRect;
+        info.constrainedRect = *targetRect;
+        info.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
+        state = m_fullscreenWindows.emplace(window, info).first;
+
+        if (shiftDown)
+        {
+            return;
+        }
+    }
+
+    if (state->second.correctionAttempts >= maxFullscreenCorrectionAttempts)
+    {
+        Logger::warn(L"Stopped constraining a fullscreen window after repeated monitor-sized resize attempts");
+        if (!PositionWindow(window, state->second.fullscreenRect))
+        {
+            Logger::warn(L"Failed to release a repeatedly resizing fullscreen window, {}", get_last_error_or_default(GetLastError()));
+        }
+        state->second.state = FullscreenInZoneState::Bypassed;
+        state->second.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
+        return;
+    }
+
+    ++state->second.correctionAttempts;
+    state->second.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
+    if (!PositionWindow(window, state->second.constrainedRect))
+    {
+        Logger::warn(L"Failed to keep fullscreen window in its FancyZone, {}", get_last_error_or_default(GetLastError()));
+        state->second.state = FullscreenInZoneState::Bypassed;
+    }
+}
+
+void FancyZones::UpdateFullscreenWindows() noexcept
+{
+    if (!FancyZonesSettings::settings().fullscreenInZone)
+    {
+        ReleaseFullscreenWindows();
+        return;
+    }
+
+    std::vector<HWND> trackedWindows;
+    trackedWindows.reserve(m_fullscreenWindows.size());
+    for (const auto& [window, _] : m_fullscreenWindows)
+    {
+        trackedWindows.push_back(window);
+    }
+
+    for (const auto window : trackedWindows)
+    {
+        HandleFullscreenWindow(window);
+    }
+
+    for (const auto& [_, workArea] : m_workAreaConfiguration.GetAllWorkAreas())
+    {
+        if (!workArea)
+        {
+            continue;
+        }
+
+        for (const auto& windowAssignment : workArea->GetLayoutWindows().SnappedWindows())
+        {
+            HandleFullscreenWindow(windowAssignment.first);
+        }
+    }
 }
 
 bool FancyZones::MoveToAppLastZone(HWND window, HMONITOR monitor, GUID currentVirtualDesktop) noexcept
@@ -704,6 +1080,13 @@ LRESULT FancyZones::WndProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         else if (message == WM_PRIV_LOCATIONCHANGE)
         {
+            auto hwnd = reinterpret_cast<HWND>(wparam);
+            m_pendingLocationChanges.erase(hwnd);
+            if (!m_windowMouseSnapper && hwnd && FancyZonesSettings::settings().fullscreenInZone)
+            {
+                HandleFullscreenWindow(hwnd, lparam != 0);
+            }
+
             if (auto monitor = MonitorFromPoint(ptScreen, MONITOR_DEFAULTTONULL))
             {
                 MoveSizeUpdate(monitor, ptScreen);
@@ -717,6 +1100,8 @@ LRESULT FancyZones::WndProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         else if (message == WM_PRIV_WINDOWDESTROYED)
         {
             auto hwnd = reinterpret_cast<HWND>(wparam);
+            m_fullscreenWindows.erase(hwnd);
+            m_pendingLocationChanges.erase(hwnd);
             // If the destroyed window was being dragged, abort the drag without
             // snapping. Calling MoveSizeEnd() here would snap the now-destroyed
             // HWND into a zone and corrupt the layout state.
@@ -972,6 +1357,8 @@ void FancyZones::UpdateWorkAreas(bool updateWindowPositions) noexcept
             }
         }
     }
+
+    UpdateFullscreenWindows();
 }
 
 bool FancyZones::ShouldWorkAreasBeRecreated(const std::vector<FancyZonesDataTypes::MonitorId>& monitors, const GUID& virtualDesktop, const std::unordered_map<HMONITOR, std::unique_ptr<WorkArea>>& workAreas) noexcept
@@ -1109,6 +1496,11 @@ void FancyZones::SettingsUpdate(SettingId id)
         MoveSizeEnd();
         m_workAreaConfiguration.Clear();
         PostMessageW(m_window, WM_PRIV_INIT, NULL, NULL);
+    }
+    break;
+    case SettingId::FullscreenInZone:
+    {
+        UpdateFullscreenWindows();
     }
     break;
     default:

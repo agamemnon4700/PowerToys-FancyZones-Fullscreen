@@ -173,6 +173,9 @@
                             <tkcontrols:SettingsCard Name="FancyZonesRestoreSize" ContentAlignment="Left">
                                 <CheckBox x:Uid="FancyZones_RestoreSize" IsChecked="{x:Bind ViewModel.RestoreSize, Mode=TwoWay}" />
                             </tkcontrols:SettingsCard>
+                            <tkcontrols:SettingsCard Name="FancyZonesFullscreenInZone" ContentAlignment="Left">
+                                <CheckBox x:Uid="FancyZones_FullscreenInZone" IsChecked="{x:Bind ViewModel.FullscreenInZone, Mode=TwoWay}" />
+                            </tkcontrols:SettingsCard>
                             <tkcontrols:SettingsCard Name="FancyZonesMakeDraggedWindowTransparentCheckBoxControl" ContentAlignment="Left">
                                 <CheckBox x:Uid="FancyZones_MakeDraggedWindowTransparentCheckBoxControl" IsChecked="{x:Bind ViewModel.MakeDraggedWindowsTransparent, Mode=TwoWay}" />
                             </tkcontrols:SettingsCard>

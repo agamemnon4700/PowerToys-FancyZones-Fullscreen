@@ -4,8 +4,9 @@
 #include <common/utils/EventWaiter.h>
 
 #include <FancyZonesLib/FancyZones.h>
+#include <FancyZonesLib/SettingsObserver.h>
 
-class FancyZonesApp
+class FancyZonesApp : public SettingsObserver
 {
 public:
     FancyZonesApp(const std::wstring& appName, const std::wstring& appKey);
@@ -23,10 +24,13 @@ private:
 
     EventWaiter m_exitEventWaiter;
     DWORD m_mainThreadId;
+    bool m_moveSizeInProgress = false;
 
     void DisableModule() noexcept;
 
     void InitHooks();
+    void UpdateLocationChangeHook() noexcept;
+    void SettingsUpdate(SettingId id) override;
 
     void HandleWinHookEvent(WinHookEvent* data) noexcept;
     intptr_t HandleKeyboardHookEvent(LowlevelKeyboardEvent* data) noexcept;

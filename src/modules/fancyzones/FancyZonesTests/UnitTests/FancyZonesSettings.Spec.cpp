@@ -5,12 +5,32 @@
 #include <FancyZonesLib/Settings.h>
 #include <FancyZonesLib/FancyZones.h>
 #include <FancyZonesLib/ModuleConstants.h>
+#include <FancyZonesLib/SettingsObserver.h>
 #include <common/SettingsAPI/settings_helpers.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace FancyZonesUnitTests
 {
+    class FullscreenInZoneSettingsObserver : public SettingsObserver
+    {
+    public:
+        FullscreenInZoneSettingsObserver() :
+            SettingsObserver({ SettingId::FullscreenInZone })
+        {
+        }
+
+        void SettingsUpdate(SettingId id) override
+        {
+            if (id == SettingId::FullscreenInZone)
+            {
+                ++notificationCount;
+            }
+        }
+
+        size_t notificationCount = 0;
+    };
+
     void compareHotkeyObjects(const PowerToysSettings::HotkeyObject& expected, const PowerToysSettings::HotkeyObject& actual)
     {
         Assert::AreEqual(expected.alt_pressed(), actual.alt_pressed());
@@ -38,6 +58,7 @@ namespace FancyZonesUnitTests
         Assert::AreEqual(expected.appLastZone_moveWindows, actual.appLastZone_moveWindows);
         Assert::AreEqual(expected.openWindowOnActiveMonitor, actual.openWindowOnActiveMonitor);
         Assert::AreEqual(expected.restoreSize, actual.restoreSize);
+        Assert::AreEqual(expected.fullscreenInZone, actual.fullscreenInZone);
         Assert::AreEqual(expected.use_cursorpos_editor_startupscreen, actual.use_cursorpos_editor_startupscreen);
         Assert::AreEqual(expected.showZonesOnAllMonitors, actual.showZonesOnAllMonitors);
         Assert::AreEqual(expected.spanZonesAcrossMonitors, actual.spanZonesAcrossMonitors);
@@ -78,6 +99,7 @@ namespace FancyZonesUnitTests
             values.add_property(L"fancyzones_appLastZone_moveWindows", m_defaultSettings.appLastZone_moveWindows);
             values.add_property(L"fancyzones_openWindowOnActiveMonitor", m_defaultSettings.openWindowOnActiveMonitor);
             values.add_property(L"fancyzones_restoreSize", m_defaultSettings.restoreSize);
+            values.add_property(L"fancyzones_fullscreenInZone", m_defaultSettings.fullscreenInZone);
             values.add_property(L"use_cursorpos_editor_startupscreen", m_defaultSettings.use_cursorpos_editor_startupscreen);
             values.add_property(L"fancyzones_show_on_all_monitors", m_defaultSettings.showZonesOnAllMonitors);
             values.add_property(L"fancyzones_multi_monitor_mode", m_defaultSettings.spanZonesAcrossMonitors);
@@ -105,6 +127,7 @@ namespace FancyZonesUnitTests
         {
             //prepare data
             const Settings expected{
+                .fullscreenInZone = true,
                 .excludedApps = L"app\r\napp1\r\napp2\r\nanother app",
                 .excludedAppsArray = { L"APP", L"APP1", L"APP2", L"ANOTHER APP" },
             };
@@ -121,6 +144,7 @@ namespace FancyZonesUnitTests
             values.add_property(L"fancyzones_appLastZone_moveWindows", expected.appLastZone_moveWindows);
             values.add_property(L"fancyzones_openWindowOnActiveMonitor", expected.openWindowOnActiveMonitor);
             values.add_property(L"fancyzones_restoreSize", expected.restoreSize);
+            values.add_property(L"fancyzones_fullscreenInZone", expected.fullscreenInZone);
             values.add_property(L"use_cursorpos_editor_startupscreen", expected.use_cursorpos_editor_startupscreen);
             values.add_property(L"fancyzones_show_on_all_monitors", expected.showZonesOnAllMonitors);
             values.add_property(L"fancyzones_multi_monitor_mode", expected.spanZonesAcrossMonitors);
@@ -140,6 +164,20 @@ namespace FancyZonesUnitTests
             FancyZonesSettings::instance().LoadSettings();
             auto actual = FancyZonesSettings::settings();
             compareSettings(expected, actual);
+        }
+
+        TEST_METHOD (FullscreenInZoneNotifiesOnlyWhenValueChanges)
+        {
+            FullscreenInZoneSettingsObserver observer;
+            PowerToysSettings::PowerToyValues values(NonLocalizable::ModuleKey, NonLocalizable::ModuleKey);
+            values.add_property(L"fancyzones_fullscreenInZone", true);
+            json::to_file(FancyZonesSettings::GetSettingsFileName(), values.get_raw_json());
+
+            FancyZonesSettings::instance().LoadSettings();
+            Assert::AreEqual<size_t>(1, observer.notificationCount);
+
+            FancyZonesSettings::instance().LoadSettings();
+            Assert::AreEqual<size_t>(1, observer.notificationCount);
         }
 
         TEST_METHOD (ParseInvalid)

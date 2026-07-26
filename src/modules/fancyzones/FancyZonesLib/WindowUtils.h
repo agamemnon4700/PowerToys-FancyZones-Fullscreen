@@ -16,6 +16,9 @@
 namespace FancyZonesWindowUtils
 {
     bool IsWindowMaximized(HWND window) noexcept;
+    bool HasFullscreenStyle(LONG_PTR style) noexcept;
+    bool IsFullscreenWindow(const RECT& windowRect, const RECT& monitorRect, LONG_PTR style) noexcept;
+    bool IsFullscreenWindow(HWND window) noexcept;
     bool HasVisibleOwner(HWND window) noexcept;
     bool IsRoot(HWND window) noexcept;
     
