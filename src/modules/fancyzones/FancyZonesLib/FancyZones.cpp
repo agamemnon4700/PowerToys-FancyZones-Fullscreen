@@ -71,13 +71,12 @@ namespace
     constexpr unsigned int maxFullscreenCorrectionAttempts = 4;
     constexpr ULONGLONG fullscreenCorrectionWindowMs = 1000;
     constexpr ULONGLONG fullscreenTransitionGraceMs = 1000;
-    // Chromium rewrites cross-process resize requests back to the monitor
-    // rectangle from WM_WINDOWPOSCHANGING while it is fullscreen.
-    constexpr UINT fullscreenPositionFlags = SWP_NOACTIVATE |
-                                             SWP_NOOWNERZORDER |
-                                             SWP_NOZORDER |
-                                             SWP_NOSENDCHANGING |
-                                             SWP_ASYNCWINDOWPOS;
+    constexpr UINT fullscreenNotifyingPositionFlags = SWP_NOACTIVATE |
+                                                      SWP_NOOWNERZORDER |
+                                                      SWP_NOZORDER |
+                                                      SWP_ASYNCWINDOWPOS;
+    constexpr UINT fullscreenEnforcingPositionFlags = fullscreenNotifyingPositionFlags |
+                                                      SWP_NOSENDCHANGING;
 
     bool RectsMatch(const RECT& lhs, const RECT& rhs, LONG tolerance = fullscreenRectTolerance) noexcept
     {
@@ -95,7 +94,27 @@ namespace
                             rect.top,
                             rect.right - rect.left,
                             rect.bottom - rect.top,
-                            fullscreenPositionFlags);
+                            fullscreenNotifyingPositionFlags);
+    }
+
+    bool ConstrainWindow(HWND window, const RECT& rect) noexcept
+    {
+        // Chromium uses WM_WINDOWPOSCHANGING to clear its background-fullscreen
+        // state and update the renderer viewport, but then rewrites the request
+        // back to the monitor rectangle. Queue a notified request first, followed
+        // by an enforced request that preserves the FancyZone bounds.
+        if (!PositionWindow(window, rect))
+        {
+            return false;
+        }
+
+        return SetWindowPos(window,
+                            nullptr,
+                            rect.left,
+                            rect.top,
+                            rect.right - rect.left,
+                            rect.bottom - rect.top,
+                            fullscreenEnforcingPositionFlags);
     }
 }
 
@@ -709,7 +728,7 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
 
     ++state->second.correctionAttempts;
     state->second.transitionGraceUntil = now + fullscreenTransitionGraceMs;
-    if (!PositionWindow(window, state->second.constrainedRect))
+    if (!ConstrainWindow(window, state->second.constrainedRect))
     {
         Logger::warn(L"Failed to keep fullscreen window in its FancyZone, {}", get_last_error_or_default(GetLastError()));
         state->second.state = FullscreenInZoneState::Bypassed;

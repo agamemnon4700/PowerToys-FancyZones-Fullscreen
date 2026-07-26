@@ -34,9 +34,11 @@ standard Windows behavior.
    monitor, allowing a small frame tolerance.
 4. The combined rectangle for the window's assigned zones is converted from
    work-area coordinates to screen coordinates.
-5. `SetWindowPos` reapplies that rectangle without restoring the window. This
-   preserves the app's own fullscreen state and its saved pre-fullscreen
-   placement.
+5. Two asynchronous `SetWindowPos` requests reapply that rectangle without
+   restoring the window. The first delivers the app's normal size-changing
+   notification so Chromium refreshes its background-fullscreen renderer
+   viewport. The second suppresses that notification so Chromium cannot
+   replace the requested zone bounds with the monitor rectangle.
 6. When the app restores its caption or sizing frame, tracking for that window
    ends. Destroyed windows and disabled settings are also removed from the
    tracker.
@@ -72,6 +74,8 @@ Manual validation should include:
 
 - Chrome and Edge F11 enter/exit from a single assigned zone.
 - YouTube fullscreen enter/exit using both the player button and keyboard.
+- Multiple Chromium fullscreen windows on one monitor, including repeated
+  activation changes, with each renderer remaining sized to its zone.
 - Shift bypass during entry.
 - Feature disabled and unzoned-window controls.
 - Multi-monitor layouts, including mixed DPI and negative monitor origins.
