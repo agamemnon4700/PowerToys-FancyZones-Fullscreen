@@ -61,6 +61,7 @@ struct FullscreenInZoneWindowInfo
     RECT fullscreenRect{};
     RECT constrainedRect{};
     unsigned int correctionAttempts = 0;
+    ULONGLONG correctionWindowStarted = 0;
     ULONGLONG transitionGraceUntil = 0;
 };
 
@@ -68,6 +69,7 @@ namespace
 {
     constexpr LONG fullscreenRectTolerance = 1;
     constexpr unsigned int maxFullscreenCorrectionAttempts = 4;
+    constexpr ULONGLONG fullscreenCorrectionWindowMs = 1000;
     constexpr ULONGLONG fullscreenTransitionGraceMs = 1000;
     // Chromium rewrites cross-process resize requests back to the monitor
     // rectangle from WM_WINDOWPOSCHANGING while it is fullscreen.
@@ -618,6 +620,7 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
 
             state->second.constrainedRect = *targetRect;
             state->second.correctionAttempts = 0;
+            state->second.correctionWindowStarted = 0;
             state->second.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
             targetChangedWhileConstrained = true;
 
@@ -633,10 +636,6 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
 
         if (RectsMatch(currentRect, state->second.constrainedRect))
         {
-            // Count only consecutive attempts that have not yet been observed
-            // at the zone rectangle. Fullscreen apps can reassert their monitor
-            // bounds after focus changes throughout a long-running session.
-            state->second.correctionAttempts = 0;
             return;
         }
 
@@ -688,6 +687,14 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
         }
     }
 
+    const auto now = GetTickCount64();
+    if (!state->second.correctionWindowStarted ||
+        now - state->second.correctionWindowStarted >= fullscreenCorrectionWindowMs)
+    {
+        state->second.correctionAttempts = 0;
+        state->second.correctionWindowStarted = now;
+    }
+
     if (state->second.correctionAttempts >= maxFullscreenCorrectionAttempts)
     {
         Logger::warn(L"Stopped constraining a fullscreen window after repeated monitor-sized resize attempts");
@@ -701,7 +708,7 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
     }
 
     ++state->second.correctionAttempts;
-    state->second.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
+    state->second.transitionGraceUntil = now + fullscreenTransitionGraceMs;
     if (!PositionWindow(window, state->second.constrainedRect))
     {
         Logger::warn(L"Failed to keep fullscreen window in its FancyZone, {}", get_last_error_or_default(GetLastError()));
