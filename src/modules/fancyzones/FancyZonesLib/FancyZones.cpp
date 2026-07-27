@@ -63,6 +63,8 @@ struct FullscreenInZoneWindowInfo
     unsigned int correctionAttempts = 0;
     ULONGLONG correctionWindowStarted = 0;
     ULONGLONG transitionGraceUntil = 0;
+    bool correctionPending = false;
+    ULONGLONG correctionVerificationDue = 0;
 };
 
 namespace
@@ -71,12 +73,19 @@ namespace
     constexpr unsigned int maxFullscreenCorrectionAttempts = 4;
     constexpr ULONGLONG fullscreenCorrectionWindowMs = 1000;
     constexpr ULONGLONG fullscreenTransitionGraceMs = 1000;
-    constexpr UINT fullscreenNotifyingPositionFlags = SWP_NOACTIVATE |
-                                                      SWP_NOOWNERZORDER |
-                                                      SWP_NOZORDER |
+    constexpr ULONGLONG fullscreenCorrectionVerificationMs = 50;
+    constexpr UINT fullscreenPositionFlags = SWP_NOACTIVATE |
+                                             SWP_NOOWNERZORDER |
+                                             SWP_NOZORDER;
+    constexpr UINT fullscreenNotifyingPositionFlags = fullscreenPositionFlags |
                                                       SWP_ASYNCWINDOWPOS;
     constexpr UINT fullscreenEnforcingPositionFlags = fullscreenNotifyingPositionFlags |
                                                       SWP_NOSENDCHANGING;
+    constexpr UINT fullscreenPositionNotificationTimeoutMs = 50;
+    constexpr UINT_PTR fullscreenCorrectionVerificationTimerId = 1;
+    constexpr wchar_t chromiumWindowClassPrefix[] = L"Chrome_WidgetWin_";
+    constexpr wchar_t chromiumRendererClassName[] = L"Chrome_RenderWidgetHostHWND";
+    constexpr wchar_t chromiumD3DWindowClassName[] = L"Intermediate D3D Window";
 
     bool RectsMatch(const RECT& lhs, const RECT& rhs, LONG tolerance = fullscreenRectTolerance) noexcept
     {
@@ -97,13 +106,104 @@ namespace
                             fullscreenNotifyingPositionFlags);
     }
 
+    bool IsChromiumWindow(HWND window) noexcept
+    {
+        wchar_t className[64]{};
+        const auto length = GetClassNameW(window, className, static_cast<int>(std::size(className)));
+        return length >= static_cast<int>(std::size(chromiumWindowClassPrefix) - 1) &&
+               wcsncmp(className, chromiumWindowClassPrefix, std::size(chromiumWindowClassPrefix) - 1) == 0;
+    }
+
+    bool HasMismatchedChromiumSurface(HWND window) noexcept
+    {
+        if (!IsChromiumWindow(window))
+        {
+            return false;
+        }
+
+        RECT clientRect{};
+        if (!GetClientRect(window, &clientRect))
+        {
+            return false;
+        }
+
+        struct SurfaceCheck
+        {
+            LONG width;
+            LONG height;
+            bool mismatch = false;
+        } check{
+            .width = clientRect.right - clientRect.left,
+            .height = clientRect.bottom - clientRect.top,
+        };
+
+        EnumChildWindows(
+            window,
+            [](HWND child, LPARAM data) -> BOOL {
+                if (!IsWindowVisible(child))
+                {
+                    return TRUE;
+                }
+
+                wchar_t className[64]{};
+                if (!GetClassNameW(child, className, static_cast<int>(std::size(className))) ||
+                    (wcscmp(className, chromiumRendererClassName) != 0 &&
+                     wcscmp(className, chromiumD3DWindowClassName) != 0))
+                {
+                    return TRUE;
+                }
+
+                RECT childRect{};
+                if (!GetClientRect(child, &childRect))
+                {
+                    return TRUE;
+                }
+
+                auto& surfaceCheck = *reinterpret_cast<SurfaceCheck*>(data);
+                const auto childWidth = childRect.right - childRect.left;
+                const auto childHeight = childRect.bottom - childRect.top;
+                surfaceCheck.mismatch = std::abs(childWidth - surfaceCheck.width) > fullscreenRectTolerance ||
+                                        std::abs(childHeight - surfaceCheck.height) > fullscreenRectTolerance;
+                return surfaceCheck.mismatch ? FALSE : TRUE;
+            },
+            reinterpret_cast<LPARAM>(&check));
+
+        return check.mismatch;
+    }
+
+    void NotifyChromiumPositionChanging(HWND window, const RECT& rect) noexcept
+    {
+        WINDOWPOS position{
+            .hwnd = window,
+            .hwndInsertAfter = nullptr,
+            .x = rect.left,
+            .y = rect.top,
+            .cx = rect.right - rect.left,
+            .cy = rect.bottom - rect.top,
+            .flags = fullscreenPositionFlags,
+        };
+        DWORD_PTR ignored{};
+        SendMessageTimeoutW(window,
+                            WM_WINDOWPOSCHANGING,
+                            0,
+                            reinterpret_cast<LPARAM>(&position),
+                            SMTO_BLOCK | SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                            fullscreenPositionNotificationTimeoutMs,
+                            &ignored);
+    }
+
     bool ConstrainWindow(HWND window, const RECT& rect) noexcept
     {
-        // Chromium uses WM_WINDOWPOSCHANGING to clear its background-fullscreen
-        // state and update the renderer viewport, but then rewrites the request
-        // back to the monitor rectangle. Queue a notified request first, followed
-        // by an enforced request that preserves the FancyZone bounds.
-        if (!PositionWindow(window, rect))
+        if (IsChromiumWindow(window))
+        {
+            // Chromium needs WM_WINDOWPOSCHANGING to clear its background-
+            // fullscreen state and refresh the renderer viewport, but it also
+            // rewrites a real notified resize back to the monitor rectangle.
+            // Deliver that bookkeeping message with a bounded send so there is
+            // no intermediate monitor-sized transaction for DWM to present.
+            NotifyChromiumPositionChanging(window, rect);
+        }
+        else if (!PositionWindow(window, rect))
         {
             return false;
         }
@@ -196,15 +296,25 @@ public:
                 break;
             }
 
-            if (!m_pendingLocationChanges.emplace(data->hwnd).second)
+            auto locationWindow = data->hwnd;
+            if (locationWindow && FancyZonesSettings::settings().fullscreenInZone)
+            {
+                if (const auto rootWindow = GetAncestor(locationWindow, GA_ROOT))
+                {
+                    locationWindow = rootWindow;
+                }
+            }
+
+            if (!locationWindow || !m_pendingLocationChanges.emplace(locationWindow).second)
             {
                 break;
             }
 
             const LONG shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (!PostMessageW(m_window, WM_PRIV_LOCATIONCHANGE, wparam, shiftDown))
+            const auto locationWparam = reinterpret_cast<WPARAM>(locationWindow);
+            if (!PostMessageW(m_window, WM_PRIV_LOCATIONCHANGE, locationWparam, shiftDown))
             {
-                m_pendingLocationChanges.erase(data->hwnd);
+                m_pendingLocationChanges.erase(locationWindow);
                 Logger::warn(L"Failed to queue a fullscreen window location update, {}", get_last_error_or_default(GetLastError()));
             }
         }
@@ -244,6 +354,9 @@ public:
     void ReleaseFullscreenWindows() noexcept;
     void RestoreFullscreenWindow(HWND window, const FullscreenInZoneWindowInfo& info) noexcept;
     std::optional<RECT> GetAssignedZoneRect(HWND window) noexcept;
+    void ScheduleFullscreenCorrectionVerification() noexcept;
+    void VerifyFullscreenCorrections() noexcept;
+    void StopFullscreenCorrectionVerification() noexcept;
 
     void WindowCreated(HWND window) noexcept;
     void ToggleEditor() noexcept;
@@ -285,6 +398,7 @@ private:
     DraggingState m_draggingState;
     std::unordered_map<HWND, FullscreenInZoneWindowInfo> m_fullscreenWindows;
     std::unordered_set<HWND> m_pendingLocationChanges;
+    bool m_fullscreenCorrectionVerificationTimerActive = false;
 
     wil::unique_handle m_terminateEditorEvent; // Handle of FancyZonesEditor.exe we launch and wait on
 
@@ -572,12 +686,94 @@ void FancyZones::RestoreFullscreenWindow(HWND window, const FullscreenInZoneWind
 
 void FancyZones::ReleaseFullscreenWindows() noexcept
 {
+    StopFullscreenCorrectionVerification();
+
     for (const auto& [window, info] : m_fullscreenWindows)
     {
         RestoreFullscreenWindow(window, info);
     }
 
     m_fullscreenWindows.clear();
+}
+
+void FancyZones::ScheduleFullscreenCorrectionVerification() noexcept
+{
+    if (m_fullscreenCorrectionVerificationTimerActive || !m_window)
+    {
+        return;
+    }
+
+    if (SetTimer(m_window,
+                 fullscreenCorrectionVerificationTimerId,
+                 static_cast<UINT>(fullscreenCorrectionVerificationMs),
+                 nullptr))
+    {
+        m_fullscreenCorrectionVerificationTimerActive = true;
+    }
+    else
+    {
+        Logger::warn(L"Failed to schedule fullscreen window correction verification, {}", get_last_error_or_default(GetLastError()));
+    }
+}
+
+void FancyZones::StopFullscreenCorrectionVerification() noexcept
+{
+    if (m_fullscreenCorrectionVerificationTimerActive && m_window)
+    {
+        KillTimer(m_window, fullscreenCorrectionVerificationTimerId);
+    }
+    m_fullscreenCorrectionVerificationTimerActive = false;
+}
+
+void FancyZones::VerifyFullscreenCorrections() noexcept
+{
+    const auto now = GetTickCount64();
+    std::vector<HWND> dueWindows;
+    bool hasPendingCorrections = false;
+
+    for (const auto& [window, info] : m_fullscreenWindows)
+    {
+        if (!info.correctionPending)
+        {
+            continue;
+        }
+
+        hasPendingCorrections = true;
+        if (now >= info.correctionVerificationDue)
+        {
+            dueWindows.push_back(window);
+        }
+    }
+
+    for (const auto window : dueWindows)
+    {
+        const auto state = m_fullscreenWindows.find(window);
+        if (state == m_fullscreenWindows.end() ||
+            !state->second.correctionPending ||
+            now < state->second.correctionVerificationDue)
+        {
+            continue;
+        }
+
+        state->second.correctionPending = false;
+        state->second.correctionVerificationDue = 0;
+        HandleFullscreenWindow(window);
+    }
+
+    hasPendingCorrections = false;
+    for (const auto& [_, info] : m_fullscreenWindows)
+    {
+        if (info.correctionPending)
+        {
+            hasPendingCorrections = true;
+            break;
+        }
+    }
+
+    if (!hasPendingCorrections)
+    {
+        StopFullscreenCorrectionVerification();
+    }
 }
 
 void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
@@ -649,6 +845,8 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
             state->second.correctionAttempts = 0;
             state->second.correctionWindowStarted = 0;
             state->second.transitionGraceUntil = GetTickCount64() + fullscreenTransitionGraceMs;
+            state->second.correctionPending = false;
+            state->second.correctionVerificationDue = 0;
             targetChangedWhileConstrained = true;
 
             MONITORINFO monitorInfo{};
@@ -661,14 +859,27 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
             }
         }
 
-        if (RectsMatch(currentRect, state->second.constrainedRect))
+        if (state->second.correctionPending &&
+            GetTickCount64() < state->second.correctionVerificationDue)
+        {
+            return;
+        }
+
+        state->second.correctionPending = false;
+        state->second.correctionVerificationDue = 0;
+
+        const bool rootIsConstrained = RectsMatch(currentRect, state->second.constrainedRect);
+        const bool surfaceIsMismatched = rootIsConstrained && HasMismatchedChromiumSurface(window);
+        if (rootIsConstrained && !surfaceIsMismatched)
         {
             return;
         }
 
         // A borderless window that is neither at our zone rectangle nor back at
         // its monitor bounds has left fullscreen without restoring a frame.
-        if (!targetChangedWhileConstrained && !FancyZonesWindowUtils::IsFullscreenWindow(window))
+        if (!targetChangedWhileConstrained &&
+            !rootIsConstrained &&
+            !FancyZonesWindowUtils::IsFullscreenWindow(window))
         {
             if (GetTickCount64() < state->second.transitionGraceUntil)
             {
@@ -722,8 +933,25 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
         state->second.correctionWindowStarted = now;
     }
 
+    RECT currentRect{};
+    const bool rootIsConstrained = GetWindowRect(window, &currentRect) &&
+                                   RectsMatch(currentRect, state->second.constrainedRect);
+    const bool surfaceIsMismatched = rootIsConstrained && HasMismatchedChromiumSurface(window);
+
     if (state->second.correctionAttempts >= maxFullscreenCorrectionAttempts)
     {
+        // A stale Chromium child surface should never release an otherwise
+        // correctly constrained root window. Let Chromium settle naturally and
+        // allow another bounded retry burst after the correction window.
+        if (surfaceIsMismatched)
+        {
+            state->second.correctionPending = true;
+            state->second.correctionVerificationDue = state->second.correctionWindowStarted +
+                                                      fullscreenCorrectionWindowMs;
+            ScheduleFullscreenCorrectionVerification();
+            return;
+        }
+
         Logger::warn(L"Stopped constraining a fullscreen window after repeated monitor-sized resize attempts");
         if (!PositionWindow(window, state->second.fullscreenRect))
         {
@@ -736,10 +964,18 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
 
     ++state->second.correctionAttempts;
     state->second.transitionGraceUntil = now + fullscreenTransitionGraceMs;
+    state->second.correctionPending = true;
+    state->second.correctionVerificationDue = now + fullscreenCorrectionVerificationMs;
     if (!ConstrainWindow(window, state->second.constrainedRect))
     {
+        state->second.correctionPending = false;
+        state->second.correctionVerificationDue = 0;
         Logger::warn(L"Failed to keep fullscreen window in its FancyZone, {}", get_last_error_or_default(GetLastError()));
         state->second.state = FullscreenInZoneState::Bypassed;
+    }
+    else
+    {
+        ScheduleFullscreenCorrectionVerification();
     }
 }
 
@@ -1057,6 +1293,15 @@ LRESULT FancyZones::WndProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     {
         // Display resolution changed. Invalidate cached work-areas so they can be recreated with latest information.
         OnDisplayChange(DisplayChangeType::DisplayChange);
+    }
+    break;
+
+    case WM_TIMER:
+    {
+        if (wparam == fullscreenCorrectionVerificationTimerId)
+        {
+            VerifyFullscreenCorrections();
+        }
     }
     break;
 

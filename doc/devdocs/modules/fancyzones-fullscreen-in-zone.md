@@ -27,19 +27,24 @@ standard Windows behavior.
 1. FancyZones keeps an out-of-context `EVENT_OBJECT_LOCATIONCHANGE` hook active
    only while a move/size operation is running or the fullscreen setting is
    enabled.
-2. The hook accepts only top-level window location events
-   (`OBJID_WINDOW`/`CHILDID_SELF`) and marshals them to the FancyZones window.
+2. The hook maps child-window location events to their top-level root and
+   coalesces them before marshaling them to the FancyZones window. This lets a
+   stale Chromium renderer or GPU surface trigger verification of its root.
 3. FancyZones ignores unassigned windows. For an assigned window, it recognizes
    a fullscreen transition when the window is borderless and covers its
    monitor, allowing a small frame tolerance.
 4. The combined rectangle for the window's assigned zones is converted from
    work-area coordinates to screen coordinates.
-5. Two asynchronous `SetWindowPos` requests reapply that rectangle without
-   restoring the window. The first delivers the app's normal size-changing
-   notification so Chromium refreshes its background-fullscreen renderer
-   viewport. The second suppresses that notification so Chromium cannot
-   replace the requested zone bounds with the monitor rectangle.
-6. When the app restores its caption or sizing frame, tracking for that window
+5. Chromium receives a bounded synthetic `WM_WINDOWPOSCHANGING` notification
+   so it refreshes its background-fullscreen renderer state without committing
+   an intermediate monitor-sized window. One asynchronous `SetWindowPos` then
+   enforces the zone while suppressing Chromium's monitor-bounds rewrite.
+   Other apps retain the normal notified request before enforcement.
+6. A shared short verification timer coalesces location events while a
+   correction is pending. It verifies both the Chromium root and its visible
+   renderer/GPU child sizes, and retries through the existing bounded policy
+   only when the completed transaction is still inconsistent.
+7. When the app restores its caption or sizing frame, tracking for that window
    ends. Destroyed windows and disabled settings are also removed from the
    tracker.
 
@@ -76,6 +81,10 @@ Manual validation should include:
 - YouTube fullscreen enter/exit using both the player button and keyboard.
 - Multiple Chromium fullscreen windows on one monitor, including repeated
   activation changes, with each renderer remaining sized to its zone.
+- No second monitor-sized root transaction after FancyZones starts a
+  correction, and no stale renderer/GPU child after its verification tick.
+- Chromium still reaches its zone when the bounded position notification is
+  rejected or times out.
 - Shift bypass during entry.
 - Feature disabled and unzoned-window controls.
 - Multi-monitor layouts, including mixed DPI and negative monitor origins.
