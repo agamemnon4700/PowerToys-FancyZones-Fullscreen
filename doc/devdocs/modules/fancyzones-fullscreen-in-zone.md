@@ -37,13 +37,21 @@ standard Windows behavior.
    work-area coordinates to screen coordinates.
 5. Chromium receives a bounded synthetic `WM_WINDOWPOSCHANGING` notification
    so it refreshes its background-fullscreen renderer state without committing
-   an intermediate monitor-sized window. One asynchronous `SetWindowPos` then
-   enforces the zone while suppressing Chromium's monitor-bounds rewrite.
+   an intermediate monitor-sized window. The notification has a single-digit
+   millisecond deadline so an unresponsive window thread cannot hold a monitor-sized
+   root on screen. One asynchronous `SetWindowPos` then enforces the zone while
+   suppressing Chromium's monitor-bounds rewrite.
    Other apps retain the normal notified request before enforcement.
 6. A shared short verification timer coalesces location events while a
    correction is pending. It verifies both the Chromium root and its visible
-   renderer/GPU child sizes. An oversized direct Chromium surface is resized
-   to the root client area as a tightly scoped fallback.
+   renderer/GPU child sizes. The settling interval starts after the root request
+   is queued, rather than before Chromium's bounded notification. Once the root
+   is observed in its zone, child inspection waits one compositor frame without
+   extending the original deadline. An oversized direct Chromium surface is
+   resized to the root client area with Chromium's no-copy/no-redraw child-window
+   flags as a tightly scoped fallback. The timer checks pending deadlines
+   frequently enough that a just-missed tick cannot add another full settling
+   interval.
 7. Bare Escape and F11 presses synchronously record an exit intent for the
    foreground tracked window before the app receives the key. Root and renderer
    corrections pause for half a second so a queued repair cannot race the

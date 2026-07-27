@@ -80,6 +80,7 @@ namespace
     constexpr ULONGLONG fullscreenCorrectionWindowMs = 1000;
     constexpr ULONGLONG fullscreenTransitionGraceMs = 1000;
     constexpr ULONGLONG fullscreenCorrectionVerificationMs = 50;
+    constexpr ULONGLONG fullscreenPostRootSurfaceVerificationMs = 16;
     constexpr UINT fullscreenPositionFlags = SWP_NOACTIVATE |
                                              SWP_NOOWNERZORDER |
                                              SWP_NOZORDER;
@@ -87,7 +88,11 @@ namespace
                                                       SWP_ASYNCWINDOWPOS;
     constexpr UINT fullscreenEnforcingPositionFlags = fullscreenNotifyingPositionFlags |
                                                       SWP_NOSENDCHANGING;
-    constexpr UINT fullscreenPositionNotificationTimeoutMs = 50;
+    constexpr UINT fullscreenSurfacePositionFlags = fullscreenEnforcingPositionFlags |
+                                                    SWP_NOCOPYBITS |
+                                                    SWP_NOREDRAW;
+    constexpr UINT fullscreenPositionNotificationTimeoutMs = 8;
+    constexpr UINT fullscreenCorrectionTimerIntervalMs = USER_TIMER_MINIMUM;
     constexpr UINT_PTR fullscreenCorrectionVerificationTimerId = 1;
     constexpr wchar_t chromiumWindowClassPrefix[] = L"Chrome_WidgetWin_";
     constexpr wchar_t chromiumRendererClassName[] = L"Chrome_RenderWidgetHostHWND";
@@ -204,7 +209,7 @@ namespace
                               0,
                               clientRect.right - clientRect.left,
                               clientRect.bottom - clientRect.top,
-                              fullscreenEnforcingPositionFlags))
+                              fullscreenSurfacePositionFlags))
             {
                 success = false;
             }
@@ -784,7 +789,7 @@ void FancyZones::ScheduleFullscreenCorrectionVerification() noexcept
 
     if (SetTimer(m_window,
                  fullscreenCorrectionVerificationTimerId,
-                 static_cast<UINT>(fullscreenCorrectionVerificationMs),
+                 fullscreenCorrectionTimerIntervalMs,
                  nullptr))
     {
         m_fullscreenCorrectionVerificationTimerActive = true;
@@ -974,8 +979,27 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
         }
 
         const bool rootIsConstrained = RectsMatch(currentRect, state->second.constrainedRect);
+        const auto correctionNow = GetTickCount64();
         if (state->second.correctionPending &&
-            GetTickCount64() < state->second.correctionVerificationDue &&
+            !state->second.surfaceCorrectionPending &&
+            rootIsConstrained &&
+            correctionNow < state->second.correctionVerificationDue)
+        {
+            // Give Chromium one compositor frame after the root arrives before
+            // inspecting its renderer/GPU children. Shorten, but never extend,
+            // the original post-request verification deadline.
+            state->second.surfaceCorrectionPending = true;
+            const auto postRootVerificationDue =
+                correctionNow + fullscreenPostRootSurfaceVerificationMs;
+            if (postRootVerificationDue < state->second.correctionVerificationDue)
+            {
+                state->second.correctionVerificationDue = postRootVerificationDue;
+            }
+            ScheduleFullscreenCorrectionVerification();
+        }
+
+        if (state->second.correctionPending &&
+            correctionNow < state->second.correctionVerificationDue &&
             (!state->second.surfaceCorrectionPending || rootIsConstrained))
         {
             return;
@@ -1134,6 +1158,11 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
     }
     else
     {
+        // The bounded Chromium notification can consume part of the original
+        // deadline. Preserve a full settling interval after the root request
+        // has actually been queued before considering direct surface repair.
+        state->second.correctionVerificationDue =
+            GetTickCount64() + fullscreenCorrectionVerificationMs;
         ScheduleFullscreenCorrectionVerification();
     }
 }
