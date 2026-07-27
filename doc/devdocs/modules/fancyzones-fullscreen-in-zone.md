@@ -42,8 +42,8 @@ standard Windows behavior.
    Other apps retain the normal notified request before enforcement.
 6. A shared short verification timer coalesces location events while a
    correction is pending. It verifies both the Chromium root and its visible
-   renderer/GPU child sizes, and retries through the existing bounded policy
-   only when the completed transaction is still inconsistent.
+   renderer/GPU child sizes. An oversized direct Chromium surface is resized
+   to the root client area as a tightly scoped fallback.
 7. When the app restores its caption or sizing frame, tracking for that window
    ends. Destroyed windows and disabled settings are also removed from the
    tracker.
@@ -51,11 +51,13 @@ standard Windows behavior.
 Holding Shift during the initial fullscreen transition bypasses confinement
 until that fullscreen session ends.
 
-Location updates are coalesced per window. A window that repeatedly reasserts
-its monitor rectangle is retried at most four times for the same zone before
-that fullscreen session is released. Disabling the setting or shutting down
-FancyZones asynchronously restores each constrained window's original
-fullscreen rectangle before clearing its state.
+Location updates are coalesced per window. Root geometry and Chromium surface
+repairs use separate retry budgets. A verified root correction clears its
+failure budget, while four consecutive failed root verifications release that
+fullscreen session. Surface repair uses a cooldown after four attempts and
+never releases or delays an otherwise correctly constrained root. Disabling
+the setting or shutting down FancyZones asynchronously restores each
+constrained window's original fullscreen rectangle before clearing its state.
 
 ## Why this path does not inject a DLL
 
