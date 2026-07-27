@@ -27,6 +27,7 @@
 #include <FancyZonesLib/FancyZonesWindowProcessing.h>
 #include <FancyZonesLib/FancyZonesWindowProperties.h>
 #include <FancyZonesLib/FancyZonesWinHookEventIDs.h>
+#include <FancyZonesLib/FullscreenInZone.h>
 #include <FancyZonesLib/KeyboardInput.h>
 #include <FancyZonesLib/MonitorUtils.h>
 #include <FancyZonesLib/on_thread_executor.h>
@@ -66,6 +67,7 @@ struct FullscreenInZoneWindowInfo
     ULONGLONG surfaceCorrectionWindowStarted = 0;
     ULONGLONG surfaceCorrectionRetryDue = 0;
     ULONGLONG transitionGraceUntil = 0;
+    ULONGLONG exitIntentUntil = 0;
     bool correctionPending = false;
     bool surfaceCorrectionPending = false;
     ULONGLONG correctionVerificationDue = 0;
@@ -389,6 +391,7 @@ public:
     void MoveSizeUpdate(HMONITOR monitor, POINT const& ptScreen);
     void MoveSizeEnd();
     void HandleFullscreenWindow(HWND window, bool shiftDown = false) noexcept;
+    void RecordFullscreenExitIntent(HWND window) noexcept;
     void UpdateFullscreenWindows() noexcept;
     void ReleaseFullscreenWindows() noexcept;
     void RestoreFullscreenWindow(HWND window, const FullscreenInZoneWindowInfo& info) noexcept;
@@ -685,6 +688,7 @@ std::optional<RECT> FancyZones::GetAssignedZoneRect(HWND window) noexcept
 void FancyZones::RestoreFullscreenWindow(HWND window, const FullscreenInZoneWindowInfo& info) noexcept
 {
     if (info.state != FullscreenInZoneState::Constrained ||
+        GetTickCount64() < info.exitIntentUntil ||
         !window ||
         !IsWindow(window) ||
         !IsWindowVisible(window) ||
@@ -721,6 +725,42 @@ void FancyZones::RestoreFullscreenWindow(HWND window, const FullscreenInZoneWind
     {
         Logger::warn(L"Failed to restore a fullscreen window after releasing it from its FancyZone, {}", get_last_error_or_default(GetLastError()));
     }
+}
+
+void FancyZones::RecordFullscreenExitIntent(HWND window) noexcept
+{
+    if (!window || !IsWindow(window))
+    {
+        return;
+    }
+
+    if (const auto rootWindow = GetAncestor(window, GA_ROOT))
+    {
+        window = rootWindow;
+    }
+
+    const auto state = m_fullscreenWindows.find(window);
+    if (state == m_fullscreenWindows.end() ||
+        state->second.state != FullscreenInZoneState::Constrained)
+    {
+        return;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (!processId ||
+        processId != state->second.processId ||
+        !FancyZonesWindowUtils::HasFullscreenStyle(GetWindowLongPtrW(window, GWL_STYLE)))
+    {
+        return;
+    }
+
+    state->second.exitIntentUntil = GetTickCount64() + FancyZonesFullscreen::exitIntentGraceMs;
+    state->second.correctionPending = false;
+    state->second.surfaceCorrectionPending = false;
+    state->second.correctionVerificationDue = 0;
+    state->second.surfaceCorrectionRetryDue = 0;
+    ScheduleFullscreenCorrectionVerification();
 }
 
 void FancyZones::ReleaseFullscreenWindows() noexcept
@@ -774,7 +814,9 @@ void FancyZones::VerifyFullscreenCorrections() noexcept
                                    now >= info.correctionVerificationDue;
         const bool surfaceRetryDue = info.surfaceCorrectionRetryDue &&
                                      now >= info.surfaceCorrectionRetryDue;
-        if (!correctionDue && !surfaceRetryDue)
+        const bool exitIntentDue =
+            FancyZonesFullscreen::IsExitIntentVerificationDue(info.exitIntentUntil, now);
+        if (!correctionDue && !surfaceRetryDue && !exitIntentDue)
         {
             continue;
         }
@@ -805,6 +847,11 @@ void FancyZones::VerifyFullscreenCorrections() noexcept
             state->second.surfaceCorrectionRetryDue = 0;
             shouldVerify = true;
         }
+        if (FancyZonesFullscreen::IsExitIntentVerificationDue(state->second.exitIntentUntil, now))
+        {
+            state->second.exitIntentUntil = 0;
+            shouldVerify = true;
+        }
         if (shouldVerify)
         {
             HandleFullscreenWindow(window);
@@ -814,7 +861,9 @@ void FancyZones::VerifyFullscreenCorrections() noexcept
     bool hasPendingCorrections = false;
     for (const auto& [_, info] : m_fullscreenWindows)
     {
-        if (info.correctionPending || info.surfaceCorrectionRetryDue)
+        if (info.correctionPending ||
+            info.surfaceCorrectionRetryDue ||
+            FancyZonesFullscreen::HasExitIntentVerification(info.exitIntentUntil))
         {
             hasPendingCorrections = true;
             break;
@@ -862,11 +911,21 @@ void FancyZones::HandleFullscreenWindow(HWND window, bool shiftDown) noexcept
             return;
         }
 
-        if (!FancyZonesWindowUtils::HasFullscreenStyle(GetWindowLongPtrW(window, GWL_STYLE)))
+        const auto exitIntentAction =
+            FancyZonesFullscreen::EvaluateExitIntent(
+                FancyZonesWindowUtils::HasFullscreenStyle(GetWindowLongPtrW(window, GWL_STYLE)),
+                state->second.exitIntentUntil,
+                GetTickCount64());
+        if (exitIntentAction == FancyZonesFullscreen::ExitIntentAction::StopTracking)
         {
             m_fullscreenWindows.erase(state);
             return;
         }
+        if (exitIntentAction == FancyZonesFullscreen::ExitIntentAction::SuppressCorrections)
+        {
+            return;
+        }
+        state->second.exitIntentUntil = 0;
 
         const auto targetRect = GetAssignedZoneRect(window);
         if (!targetRect)
@@ -1249,6 +1308,11 @@ FancyZones::OnKeyDown(PKBDLLHOOKSTRUCT info) noexcept
     bool const win = GetAsyncKeyState(VK_LWIN) & 0x8000 || GetAsyncKeyState(VK_RWIN) & 0x8000;
     bool const alt = GetAsyncKeyState(VK_MENU) & 0x8000;
     bool const ctrl = GetAsyncKeyState(VK_CONTROL) & 0x8000;
+    if (FancyZonesFullscreen::IsExitIntentKey(info->vkCode, shift, win, alt, ctrl))
+    {
+        RecordFullscreenExitIntent(GetForegroundWindow());
+    }
+
     if ((win && !shift && !ctrl) || (win && ctrl && alt))
     {
         if ((info->vkCode == VK_RIGHT) || (info->vkCode == VK_LEFT) || (info->vkCode == VK_UP) || (info->vkCode == VK_DOWN))

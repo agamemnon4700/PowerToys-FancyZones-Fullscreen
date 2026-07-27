@@ -44,7 +44,12 @@ standard Windows behavior.
    correction is pending. It verifies both the Chromium root and its visible
    renderer/GPU child sizes. An oversized direct Chromium surface is resized
    to the root client area as a tightly scoped fallback.
-7. When the app restores its caption or sizing frame, tracking for that window
+7. Bare Escape and F11 presses synchronously record an exit intent for the
+   foreground tracked window before the app receives the key. Root and renderer
+   corrections pause for half a second so a queued repair cannot race the
+   app's fullscreen exit. A restored frame ends tracking immediately; if the
+   app ignores the key, verification resumes confinement after the deadline.
+8. When the app restores its caption or sizing frame, tracking for that window
    ends. Destroyed windows and disabled settings are also removed from the
    tracker.
 
@@ -81,6 +86,9 @@ Manual validation should include:
 
 - Chrome and Edge F11 enter/exit from a single assigned zone.
 - YouTube fullscreen enter/exit using both the player button and keyboard.
+- Exit attempts made while a root or renderer correction is pending, including
+  an ignored Escape/F11 that must resume confinement after the exit-intent
+  deadline.
 - Multiple Chromium fullscreen windows on one monitor, including repeated
   activation changes, with each renderer remaining sized to its zone.
 - No second monitor-sized root transaction after FancyZones starts a
