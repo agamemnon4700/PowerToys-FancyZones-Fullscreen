@@ -162,8 +162,8 @@ namespace
                 auto& surfaceCheck = *reinterpret_cast<SurfaceCheck*>(data);
                 const auto childWidth = childRect.right - childRect.left;
                 const auto childHeight = childRect.bottom - childRect.top;
-                surfaceCheck.mismatch = std::abs(childWidth - surfaceCheck.width) > fullscreenRectTolerance ||
-                                        std::abs(childHeight - surfaceCheck.height) > fullscreenRectTolerance;
+                surfaceCheck.mismatch = childWidth > surfaceCheck.width + fullscreenRectTolerance ||
+                                        childHeight > surfaceCheck.height + fullscreenRectTolerance;
                 return surfaceCheck.mismatch ? FALSE : TRUE;
             },
             reinterpret_cast<LPARAM>(&check));
