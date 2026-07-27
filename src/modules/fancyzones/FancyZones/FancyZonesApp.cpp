@@ -196,12 +196,17 @@ void FancyZonesApp::HandleWinHookEvent(WinHookEvent* data) noexcept
     {
         if (data->idObject == OBJID_WINDOW &&
             data->idChild == CHILDID_SELF &&
-            IsWindow(data->hwnd) &&
-            GetAncestor(data->hwnd, GA_ROOT) == data->hwnd &&
-            (m_moveSizeInProgress ||
-             !FancyZonesWindowProperties::RetrieveZoneIndexProperty(data->hwnd).empty()))
+            IsWindow(data->hwnd))
         {
-            fzCallback->HandleWinHookEvent(data);
+            const auto rootWindow = GetAncestor(data->hwnd, GA_ROOT);
+            const bool rootMoveSizeEvent = m_moveSizeInProgress && rootWindow == data->hwnd;
+            const bool zonedFullscreenEvent = FancyZonesSettings::settings().fullscreenInZone &&
+                                              rootWindow &&
+                                              !FancyZonesWindowProperties::RetrieveZoneIndexProperty(rootWindow).empty();
+            if (rootMoveSizeEvent || zonedFullscreenEvent)
+            {
+                fzCallback->HandleWinHookEvent(data);
+            }
         }
     }
     break;

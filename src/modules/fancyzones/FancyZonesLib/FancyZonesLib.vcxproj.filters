@@ -111,6 +111,9 @@
     <ClInclude Include="WindowUtils.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="FullscreenInZone.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="LayoutConfigurator.h">
       <Filter>Header Files</Filter>
     </ClInclude>

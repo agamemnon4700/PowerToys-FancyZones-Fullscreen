@@ -27,28 +27,50 @@ standard Windows behavior.
 1. FancyZones keeps an out-of-context `EVENT_OBJECT_LOCATIONCHANGE` hook active
    only while a move/size operation is running or the fullscreen setting is
    enabled.
-2. The hook accepts only top-level window location events
-   (`OBJID_WINDOW`/`CHILDID_SELF`) and marshals them to the FancyZones window.
+2. The hook maps child-window location events to their top-level root and
+   coalesces them before marshaling them to the FancyZones window. This lets a
+   stale Chromium renderer or GPU surface trigger verification of its root.
 3. FancyZones ignores unassigned windows. For an assigned window, it recognizes
    a fullscreen transition when the window is borderless and covers its
    monitor, allowing a small frame tolerance.
 4. The combined rectangle for the window's assigned zones is converted from
    work-area coordinates to screen coordinates.
-5. `SetWindowPos` reapplies that rectangle without restoring the window. This
-   preserves the app's own fullscreen state and its saved pre-fullscreen
-   placement.
-6. When the app restores its caption or sizing frame, tracking for that window
+5. Chromium receives a bounded synthetic `WM_WINDOWPOSCHANGING` notification
+   so it refreshes its background-fullscreen renderer state without committing
+   an intermediate monitor-sized window. The notification has a single-digit
+   millisecond deadline so an unresponsive window thread cannot hold a monitor-sized
+   root on screen. One asynchronous `SetWindowPos` then enforces the zone while
+   suppressing Chromium's monitor-bounds rewrite.
+   Other apps retain the normal notified request before enforcement.
+6. A shared short verification timer coalesces location events while a
+   correction is pending. It verifies both the Chromium root and its visible
+   renderer/GPU child sizes. The settling interval starts after the root request
+   is queued, rather than before Chromium's bounded notification. Once the root
+   is observed in its zone, child inspection waits one compositor frame without
+   extending the original deadline. An oversized direct Chromium surface is
+   resized to the root client area with Chromium's no-copy/no-redraw child-window
+   flags as a tightly scoped fallback. The timer checks pending deadlines
+   frequently enough that a just-missed tick cannot add another full settling
+   interval.
+7. Bare Escape and F11 presses synchronously record an exit intent for the
+   foreground tracked window before the app receives the key. Root and renderer
+   corrections pause for half a second so a queued repair cannot race the
+   app's fullscreen exit. A restored frame ends tracking immediately; if the
+   app ignores the key, verification resumes confinement after the deadline.
+8. When the app restores its caption or sizing frame, tracking for that window
    ends. Destroyed windows and disabled settings are also removed from the
    tracker.
 
 Holding Shift during the initial fullscreen transition bypasses confinement
 until that fullscreen session ends.
 
-Location updates are coalesced per window. A window that repeatedly reasserts
-its monitor rectangle is retried at most four times for the same zone before
-that fullscreen session is released. Disabling the setting or shutting down
-FancyZones asynchronously restores each constrained window's original
-fullscreen rectangle before clearing its state.
+Location updates are coalesced per window. Root geometry and Chromium surface
+repairs use separate retry budgets. A verified root correction clears its
+failure budget, while four consecutive failed root verifications release that
+fullscreen session. Surface repair uses a cooldown after four attempts and
+never releases or delays an otherwise correctly constrained root. Disabling
+the setting or shutting down FancyZones asynchronously restores each
+constrained window's original fullscreen rectangle before clearing its state.
 
 ## Why this path does not inject a DLL
 
@@ -72,6 +94,15 @@ Manual validation should include:
 
 - Chrome and Edge F11 enter/exit from a single assigned zone.
 - YouTube fullscreen enter/exit using both the player button and keyboard.
+- Exit attempts made while a root or renderer correction is pending, including
+  an ignored Escape/F11 that must resume confinement after the exit-intent
+  deadline.
+- Multiple Chromium fullscreen windows on one monitor, including repeated
+  activation changes, with each renderer remaining sized to its zone.
+- No second monitor-sized root transaction after FancyZones starts a
+  correction, and no stale renderer/GPU child after its verification tick.
+- Chromium still reaches its zone when the bounded position notification is
+  rejected or times out.
 - Shift bypass during entry.
 - Feature disabled and unzoned-window controls.
 - Multi-monitor layouts, including mixed DPI and negative monitor origins.

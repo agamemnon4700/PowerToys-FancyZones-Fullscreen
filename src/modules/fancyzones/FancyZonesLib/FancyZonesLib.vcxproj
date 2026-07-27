@@ -75,6 +75,7 @@
     <ClInclude Include="WindowKeyboardSnap.h" />
     <ClInclude Include="WindowMouseSnap.h" />
     <ClInclude Include="FancyZonesWindowProperties.h" />
+    <ClInclude Include="FullscreenInZone.h" />
     <ClInclude Include="WindowUtils.h" />
     <ClInclude Include="Zone.h" />
     <ClInclude Include="Colors.h" />

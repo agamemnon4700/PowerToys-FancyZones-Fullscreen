@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include <FancyZonesLib/FancyZonesWindowProcessing.h>
+#include <FancyZonesLib/FullscreenInZone.h>
 #include <FancyZonesLib/Settings.h>
 #include <FancyZonesLib/WindowUtils.h>
 
@@ -275,6 +276,47 @@ namespace FancyZonesUnitTests
             const RECT windowRect{ -20, -20, 1940, 1100 };
 
             Assert::IsFalse(FancyZonesWindowUtils::IsFullscreenWindow(windowRect, monitorRect, WS_POPUP | WS_VISIBLE));
+        }
+
+        TEST_METHOD (FullscreenExitIntentRecognizesOnlyBareExitKeys)
+        {
+            Assert::IsTrue(FancyZonesFullscreen::IsExitIntentKey(VK_ESCAPE, false, false, false, false));
+            Assert::IsTrue(FancyZonesFullscreen::IsExitIntentKey(VK_F11, false, false, false, false));
+
+            Assert::IsFalse(FancyZonesFullscreen::IsExitIntentKey(VK_RETURN, false, false, false, false));
+            Assert::IsFalse(FancyZonesFullscreen::IsExitIntentKey(VK_ESCAPE, true, false, false, false));
+            Assert::IsFalse(FancyZonesFullscreen::IsExitIntentKey(VK_F11, false, true, false, false));
+            Assert::IsFalse(FancyZonesFullscreen::IsExitIntentKey(VK_ESCAPE, false, false, true, false));
+            Assert::IsFalse(FancyZonesFullscreen::IsExitIntentKey(VK_F11, false, false, false, true));
+        }
+
+        TEST_METHOD (FullscreenExitIntentSuppressesCorrectionsUntilItsDeadline)
+        {
+            constexpr ULONGLONG deadline = 1500;
+
+            Assert::IsTrue(
+                FancyZonesFullscreen::EvaluateExitIntent(true, deadline, deadline - 1) ==
+                FancyZonesFullscreen::ExitIntentAction::SuppressCorrections);
+            Assert::IsTrue(
+                FancyZonesFullscreen::EvaluateExitIntent(true, deadline, deadline) ==
+                FancyZonesFullscreen::ExitIntentAction::Continue);
+        }
+
+        TEST_METHOD (FullscreenExitIntentStopsTrackingAsSoonAsTheFrameReturns)
+        {
+            Assert::IsTrue(
+                FancyZonesFullscreen::EvaluateExitIntent(false, 1500, 1000) ==
+                FancyZonesFullscreen::ExitIntentAction::StopTracking);
+        }
+
+        TEST_METHOD (FullscreenExitIntentKeepsVerificationScheduledUntilDue)
+        {
+            constexpr ULONGLONG deadline = 1500;
+
+            Assert::IsTrue(FancyZonesFullscreen::HasExitIntentVerification(deadline));
+            Assert::IsFalse(FancyZonesFullscreen::IsExitIntentVerificationDue(deadline, deadline - 1));
+            Assert::IsTrue(FancyZonesFullscreen::IsExitIntentVerificationDue(deadline, deadline));
+            Assert::IsFalse(FancyZonesFullscreen::HasExitIntentVerification(0));
         }
     };
 }
